@@ -22,7 +22,7 @@ FILE_CATEGORIES = {
     ],
     "Videos": [
         ".mp4", ".mkv", ".flv", ".avi", ".mov", ".wmv", ".webm",
-        ".m4v", ".mpg", ".mpeg", ".3gp", ".ts", ".vob"
+        ".m4v", ".mpg", ".mpeg", ".3gp", ".m2ts", ".vob"
     ],
     "Archives": [
         ".zip", ".rar", ".7z", ".tar", ".gz", ".bz2", ".xz",
@@ -61,11 +61,18 @@ INCOMPLETE_DOWNLOAD_EXTENSIONS = {
     ".crdownload", ".tmp", ".download", ".part", ".opdownload"
 }
 
-# System files and folders to ignore by default
+# Directory containing the organizer application itself (used to protect app files if run in place)
+APP_DIR = Path(__file__).resolve().parent
+APP_PROJECT_FILENAMES = {
+    "file_organizer.py", "main.py", "organizer.py", "config.py",
+    "gui.py", "watcher.py", "test_organizer.py", "run_organizer.bat",
+    "readme.md", "pyproject.toml", ".gitignore", "license",
+}
+
+# System files and organizer metadata files to ignore everywhere
 DEFAULT_IGNORED_FILENAMES = {
     "desktop.ini", "thumbs.db", ".ds_store", "organizer_history.json",
-    "organizer_log.txt", "file_organizer.py", "main.py", "organizer.py",
-    "config.py", "gui.py", "watcher.py"
+    "organizer_log.txt",
 }
 
 DEFAULT_IGNORED_DIRNAMES = {

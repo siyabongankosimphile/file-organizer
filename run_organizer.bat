@@ -2,12 +2,15 @@
 title Smart File Organizer
 cd /d "%~dp0"
 
-set PYTHON_CMD=
+set "PYTHON_EXE="
+set "PYTHON_ARGS="
 
-:: Check installed Python 3.11 in User Local AppData
-if exist "%LOCALAPPDATA%\Programs\Python\Python311\python.exe" (
-    set "PYTHON_CMD=%LOCALAPPDATA%\Programs\Python\Python311\python.exe"
-    goto found
+:: Check installed Python in User Local AppData
+for %%V in (313 312 311 310) do (
+    if exist "%LOCALAPPDATA%\Programs\Python\Python%%V\python.exe" (
+        set "PYTHON_EXE=%LOCALAPPDATA%\Programs\Python\Python%%V\python.exe"
+        goto found
+    )
 )
 
 :: Check py launcher
@@ -15,7 +18,8 @@ where py >nul 2>&1
 if %ERRORLEVEL% equ 0 (
     py -3 -c "import sys" >nul 2>&1
     if %ERRORLEVEL% equ 0 (
-        set "PYTHON_CMD=py -3"
+        set "PYTHON_EXE=py"
+        set "PYTHON_ARGS=-3"
         goto found
     )
 )
@@ -25,24 +29,32 @@ where python >nul 2>&1
 if %ERRORLEVEL% equ 0 (
     python -c "import sys" >nul 2>&1
     if %ERRORLEVEL% equ 0 (
-        set "PYTHON_CMD=python"
+        set "PYTHON_EXE=python"
         goto found
     )
 )
 
-:: Check Python314 / standard C:\Python*
-if exist "C:\Python311\python.exe" set "PYTHON_CMD=C:\Python311\python.exe" & goto found
-if exist "C:\Python312\python.exe" set "PYTHON_CMD=C:\Python312\python.exe" & goto found
-if exist "C:\Python310\python.exe" set "PYTHON_CMD=C:\Python310\python.exe" & goto found
+:: Check standard C:\Python* installations
+for %%V in (313 312 311 310) do (
+    if exist "C:\Python%%V\python.exe" (
+        set "PYTHON_EXE=C:\Python%%V\python.exe"
+        goto found
+    )
+)
 
 echo [ERROR] Python was not found on your system!
-echo Please make sure Python is installed.
+echo Please make sure Python 3.10+ is installed.
 pause
 exit /b 1
 
 :found
-echo Starting Smart File Organizer using: %PYTHON_CMD%
-%PYTHON_CMD% main.py %*
+if defined PYTHON_ARGS (
+    echo Starting Smart File Organizer using: "%PYTHON_EXE%" %PYTHON_ARGS%
+    "%PYTHON_EXE%" %PYTHON_ARGS% main.py %*
+) else (
+    echo Starting Smart File Organizer using: "%PYTHON_EXE%"
+    "%PYTHON_EXE%" main.py %*
+)
 if %ERRORLEVEL% neq 0 (
     echo.
     echo Application exited.

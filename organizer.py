@@ -7,12 +7,13 @@ import os
 import shutil
 import hashlib
 import json
-import time
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, List, Optional, Callable, Tuple, Any
+from typing import Dict, List, Optional, Callable, Tuple, Any, Set
 
 from config import (
+    APP_DIR,
+    APP_PROJECT_FILENAMES,
     FILE_CATEGORIES,
     EXTENSION_MAP,
     INCOMPLETE_DOWNLOAD_EXTENSIONS,
@@ -21,6 +22,7 @@ from config import (
 )
 
 HISTORY_FILE_NAME = "organizer_history.json"
+MAX_HISTORY_ENTRIES = 50
 
 
 def calculate_file_hash(file_path: Path, block_size: int = 65536) -> str:
@@ -32,9 +34,19 @@ def calculate_file_hash(file_path: Path, block_size: int = 65536) -> str:
     return hasher.hexdigest()
 
 
-def get_unique_destination_path(target_file: Path) -> Path:
-    """Generate a unique file path by appending (1), (2), etc. if file exists."""
-    if not target_file.exists():
+def _normalize_path(path: Path) -> str:
+    """Return a normalized path key suitable for case-aware collision tracking."""
+    return os.path.normcase(str(path.resolve()))
+
+
+def get_unique_destination_path(target_file: Path, reserved: Optional[Set[str]] = None) -> Path:
+    """Generate a unique file path by appending (1), (2), etc. if file exists or is reserved."""
+    reserved_paths = reserved or set()
+
+    def is_taken(candidate: Path) -> bool:
+        return candidate.exists() or _normalize_path(candidate) in reserved_paths
+
+    if not is_taken(target_file):
         return target_file
 
     stem = target_file.stem
@@ -44,7 +56,7 @@ def get_unique_destination_path(target_file: Path) -> Path:
 
     while True:
         candidate = parent / f"{stem} ({counter}){suffix}"
-        if not candidate.exists():
+        if not is_taken(candidate):
             return candidate
         counter += 1
 
@@ -109,8 +121,9 @@ class FileOrganizer:
         if not self.target_dir.exists() or not self.target_dir.is_dir():
             return []
 
-        # Categories that exist as subfolders in target_dir so we don't scan them recursively if not desired
-        all_category_names = set(FILE_CATEGORIES.keys()) | {"Others", "Duplicates"}
+        # Avoid pulling previously isolated duplicates back out during recursive scans
+        protected_recursive_dirs = {"duplicates"}
+        is_app_dir = _normalize_path(self.target_dir) == _normalize_path(APP_DIR)
 
         files_to_organize: List[Path] = []
 
@@ -120,17 +133,27 @@ class FileOrganizer:
             iterator = self.target_dir.iterdir()
 
         for item in iterator:
-            if not item.is_file():
+            # Skip directories and symlinks so relative links are never broken
+            if item.is_symlink() or not item.is_file():
                 continue
 
             # Check if inside an ignored directory
             parts = item.relative_to(self.target_dir).parts
-            if any(p.lower() in DEFAULT_IGNORED_DIRNAMES for p in parts[:-1]):
+            parent_parts_lower = [p.lower() for p in parts[:-1]]
+            if any(p in DEFAULT_IGNORED_DIRNAMES for p in parent_parts_lower):
+                continue
+
+            # In recursive mode, don't re-scan the Duplicates/ quarantine folder
+            if recursive and parent_parts_lower and parent_parts_lower[0] in protected_recursive_dirs:
                 continue
 
             # Check if filename is ignored
             name_lower = item.name.lower()
             if name_lower in DEFAULT_IGNORED_FILENAMES:
+                continue
+
+            # Protect the organizer's own project files only when organizing its own directory
+            if is_app_dir and item.parent.resolve() == self.target_dir and name_lower in APP_PROJECT_FILENAMES:
                 continue
 
             # Ignore hidden files if not included
@@ -147,7 +170,29 @@ class FileOrganizer:
 
             files_to_organize.append(item)
 
-        return sorted(files_to_organize, key=lambda f: f.name.lower())
+        # Prefer shorter filenames first (then alphabetical) so original names like "photo.jpg"
+        # are preserved over "duplicate_photo.jpg" or "photo (1).jpg" during duplicate detection
+        return sorted(files_to_organize, key=lambda f: (len(f.name), f.name.lower()))
+
+    def _seed_existing_hashes(self, candidate_paths: Set[str]) -> Dict[str, Path]:
+        """Hash already-organized files in known category subfolders for duplicate detection."""
+        existing_hashes: Dict[str, Path] = {}
+        category_dirs = set(FILE_CATEGORIES.keys()) | {"Others"}
+        for cat_name in category_dirs:
+            cat_dir = self.target_dir / cat_name
+            if not cat_dir.exists() or not cat_dir.is_dir():
+                continue
+            for item in cat_dir.rglob("*"):
+                if item.is_symlink() or not item.is_file():
+                    continue
+                if _normalize_path(item) in candidate_paths:
+                    continue
+                try:
+                    file_hash = calculate_file_hash(item)
+                    existing_hashes.setdefault(file_hash, item)
+                except OSError:
+                    continue
+        return existing_hashes
 
     def plan_organization(
         self,
@@ -156,21 +201,38 @@ class FileOrganizer:
         conflict_resolution: str = "rename",
         include_hidden: bool = False,
         detect_duplicates: bool = False,
+        files: Optional[List[Path]] = None,
     ) -> List[OrganizeOperation]:
         """Simulate the organization and return planned operations."""
-        files = self.scan_files(recursive=recursive, include_hidden=include_hidden)
+        if files is None:
+            candidate_files = self.scan_files(recursive=recursive, include_hidden=include_hidden)
+        else:
+            candidate_files = [Path(f) for f in files if not Path(f).is_symlink() and Path(f).is_file()]
+
         operations: List[OrganizeOperation] = []
 
         # Track existing file hashes if duplicate detection is enabled
         seen_hashes: Dict[str, Path] = {}
+        if detect_duplicates:
+            candidate_norm = {_normalize_path(f) for f in candidate_files}
+            seen_hashes = self._seed_existing_hashes(candidate_norm)
 
-        for file in files:
+        # Track destinations already claimed within this batch to prevent silent overwrites
+        reserved_destinations: Set[str] = set()
+
+        for file in candidate_files:
             dest_folder = self.get_destination_folder(file, mode=mode)
             ext = file.suffix.lower()
             category = EXTENSION_MAP.get(ext, "Others")
 
             # Check if file is already in its destination folder
             if file.parent.resolve() == dest_folder.resolve():
+                reserved_destinations.add(_normalize_path(file))
+                if detect_duplicates:
+                    try:
+                        seen_hashes.setdefault(calculate_file_hash(file), file)
+                    except OSError:
+                        pass
                 operations.append(
                     OrganizeOperation(file, file, category, "skipped", "Already in target category")
                 )
@@ -186,7 +248,8 @@ class FileOrganizer:
                     if f_hash in seen_hashes:
                         # Duplicate found
                         dup_folder = self.target_dir / "Duplicates"
-                        dup_dest = get_unique_destination_path(dup_folder / file.name)
+                        dup_dest = get_unique_destination_path(dup_folder / file.name, reserved_destinations)
+                        reserved_destinations.add(_normalize_path(dup_dest))
                         operations.append(
                             OrganizeOperation(
                                 file,
@@ -199,21 +262,25 @@ class FileOrganizer:
                         is_duplicate = True
                     else:
                         seen_hashes[f_hash] = file
-                except Exception as e:
-                    pass
+                except OSError as e:
+                    operations.append(
+                        OrganizeOperation(file, target_path, category, "error", f"Failed to hash file: {e}")
+                    )
+                    continue
 
             if is_duplicate:
                 continue
 
-            # Conflict handling
-            if target_path.exists():
+            # Conflict handling (both pre-existing files on disk and destinations reserved in this batch)
+            if target_path.exists() or _normalize_path(target_path) in reserved_destinations:
                 if conflict_resolution == "skip":
                     operations.append(
                         OrganizeOperation(file, target_path, category, "skipped", "Destination already exists")
                     )
                     continue
                 elif conflict_resolution == "rename":
-                    resolved_path = get_unique_destination_path(target_path)
+                    resolved_path = get_unique_destination_path(target_path, reserved_destinations)
+                    reserved_destinations.add(_normalize_path(resolved_path))
                     operations.append(
                         OrganizeOperation(
                             file, resolved_path, category, "moved", f"Renamed to avoid conflict: {resolved_path.name}"
@@ -221,12 +288,14 @@ class FileOrganizer:
                     )
                     continue
                 elif conflict_resolution == "overwrite":
+                    reserved_destinations.add(_normalize_path(target_path))
                     operations.append(
                         OrganizeOperation(file, target_path, category, "moved", "Overwrites existing file")
                     )
                     continue
 
             # Normal move
+            reserved_destinations.add(_normalize_path(target_path))
             operations.append(OrganizeOperation(file, target_path, category, "moved", "Normal move"))
 
         return operations
@@ -240,6 +309,7 @@ class FileOrganizer:
         detect_duplicates: bool = False,
         dry_run: bool = False,
         progress_callback: Optional[Callable[[int, int, str, str], None]] = None,
+        files: Optional[List[Path]] = None,
     ) -> Dict[str, Any]:
         """Execute organization process and save history for undo."""
         planned = self.plan_organization(
@@ -248,6 +318,7 @@ class FileOrganizer:
             conflict_resolution=conflict_resolution,
             include_hidden=include_hidden,
             detect_duplicates=detect_duplicates,
+            files=files,
         )
 
         total_files = len(planned)
@@ -287,10 +358,13 @@ class FileOrganizer:
                     op.details = str(ex)
             elif op.action == "skipped":
                 skipped_count += 1
+            elif op.action == "error":
+                error_count += 1
 
         # Record history if not dry-run and files were moved
+        history_warning: Optional[str] = None
         if not dry_run and actual_moves:
-            self._save_history(actual_moves, mode)
+            history_warning = self._save_history(actual_moves, mode)
 
         return {
             "total": total_files,
@@ -300,15 +374,18 @@ class FileOrganizer:
             "errors": error_count,
             "operations": planned,
             "dry_run": dry_run,
+            "history_warning": history_warning,
         }
 
-    def _save_history(self, moves: List[Dict[str, str]], mode: str):
-        """Append this operation batch to history file."""
+    def _save_history(self, moves: List[Dict[str, str]], mode: str) -> Optional[str]:
+        """Append this operation batch to history file. Returns a warning string on write failure."""
         history = []
         if self.history_path.exists():
             try:
                 with open(self.history_path, "r", encoding="utf-8") as f:
-                    history = json.load(f)
+                    loaded = json.load(f)
+                    if isinstance(loaded, list):
+                        history = loaded
             except Exception:
                 history = []
 
@@ -318,12 +395,34 @@ class FileOrganizer:
             "moves": moves,
         }
         history.append(batch_record)
+        if len(history) > MAX_HISTORY_ENTRIES:
+            history = history[-MAX_HISTORY_ENTRIES:]
 
         try:
             with open(self.history_path, "w", encoding="utf-8") as f:
                 json.dump(history, f, indent=2, ensure_ascii=False)
-        except Exception:
-            pass
+            return None
+        except OSError as e:
+            return f"Warning: Could not save undo history ({e})"
+
+    def _cleanup_empty_ancestors(self, start_folder: Path, logs: List[str]):
+        """Remove empty directories walking upward until target_dir (exclusive)."""
+        current = start_folder.resolve()
+        target_root = self.target_dir.resolve()
+        while current != target_root:
+            try:
+                current.relative_to(target_root)
+            except ValueError:
+                break
+            try:
+                if current.exists() and current.is_dir() and not any(current.iterdir()):
+                    current.rmdir()
+                    logs.append(f"Removed empty directory: {current.relative_to(target_root)}")
+                else:
+                    break
+            except OSError:
+                break
+            current = current.parent
 
     def undo_last_operation(
         self, progress_callback: Optional[Callable[[int, int, str, str], None]] = None
@@ -339,9 +438,9 @@ class FileOrganizer:
             with open(self.history_path, "r", encoding="utf-8") as f:
                 history = json.load(f)
         except Exception as e:
-            return 0, 0, [f"Failed to read history: {e}"]
+            return 0, 0, [f"Error: Failed to read history: {e}"]
 
-        if not history:
+        if not isinstance(history, list) or not history:
             return 0, 0, ["History is empty."]
 
         last_batch = history.pop()
@@ -349,8 +448,9 @@ class FileOrganizer:
         total = len(moves)
         restored = 0
         errors = 0
-        logs = []
-        folders_to_check = set()
+        logs: List[str] = []
+        failed_moves: List[Dict[str, str]] = []
+        folders_to_check: Set[Path] = set()
 
         # Reverse moves in reverse order
         for idx, item in enumerate(reversed(moves)):
@@ -361,8 +461,9 @@ class FileOrganizer:
                 progress_callback(idx + 1, total, current_dest.name, "restoring")
 
             if not current_dest.exists():
-                logs.append(f"Cannot restore {current_dest.name}: File missing at destination.")
+                logs.append(f"Error: Cannot restore {current_dest.name}: File missing at destination.")
                 errors += 1
+                failed_moves.append(item)
                 continue
 
             try:
@@ -376,24 +477,25 @@ class FileOrganizer:
                 folders_to_check.add(current_dest.parent)
             except Exception as e:
                 errors += 1
+                failed_moves.append(item)
                 logs.append(f"Error restoring {current_dest.name}: {e}")
 
-        # Clean up empty folders created by organization
-        for folder in folders_to_check:
-            try:
-                if folder.exists() and folder != self.target_dir:
-                    # check if folder is empty
-                    if not any(folder.iterdir()):
-                        folder.rmdir()
-                        logs.append(f"Removed empty directory: {folder.name}")
-            except Exception:
-                pass
+        # Clean up empty folders created by organization (deepest first, walking up to target_dir)
+        for folder in sorted(folders_to_check, key=lambda p: len(p.parts), reverse=True):
+            self._cleanup_empty_ancestors(folder, logs)
+
+        # Preserve failed moves in history so the user can retry once locks/issues are resolved
+        if failed_moves:
+            retry_batch = dict(last_batch)
+            retry_batch["moves"] = list(reversed(failed_moves))
+            history.append(retry_batch)
+            logs.append(f"Note: Kept {len(failed_moves)} unrestored item(s) in undo history for retry.")
 
         # Save remaining history
         try:
             with open(self.history_path, "w", encoding="utf-8") as f:
                 json.dump(history, f, indent=2, ensure_ascii=False)
-        except Exception:
-            pass
+        except OSError as e:
+            logs.append(f"Error: Failed to update history file: {e}")
 
         return restored, errors, logs

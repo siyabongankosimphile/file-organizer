@@ -1,0 +1,17 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "smart-file-organizer"
+version = "1.0.0"
+description = "Zero-dependency Python file organizer with GUI, CLI, duplicate detection, live folder watcher, and safe undo."
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = []
+
+[project.scripts]
+smart-file-organizer = "main:main"
+
+[tool.setuptools]
+py-modules = ["main", "gui", "organizer", "watcher", "config", "file_organizer"]

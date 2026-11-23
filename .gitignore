@@ -1,0 +1,28 @@
+# Python bytecode & caches
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Packaging / build artifacts
+build/
+dist/
+*.egg-info/
+
+# Organizer runtime artifacts
+organizer_history.json
+organizer_log.txt
+
+# OS & editor files
+.DS_Store
+Thumbs.db
+desktop.ini
+.vscode/
+.idea/

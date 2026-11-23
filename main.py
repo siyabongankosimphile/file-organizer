@@ -4,6 +4,7 @@ Supports both graphical user interface (GUI) and command-line interface (CLI).
 """
 
 import sys
+import time
 import argparse
 from pathlib import Path
 from organizer import FileOrganizer
@@ -30,18 +31,27 @@ def run_cli(args):
 
     # Watcher mode
     if args.watch:
-        print(f"Starting live folder watcher on: {target}")
-        print("Press Ctrl+C to stop.")
-        watcher = FolderWatcher(target, mode=args.mode)
+        if not args.quiet:
+            print(f"Starting live folder watcher on: {target}")
+            print(f"Mode: {args.mode} | Conflict: {args.conflict} | Duplicates: {args.duplicates}")
+            print("Press Ctrl+C to stop.")
+        watcher = FolderWatcher(
+            target,
+            mode=args.mode,
+            conflict_resolution=args.conflict,
+            detect_duplicates=args.duplicates,
+            on_event=(lambda _msg: None) if args.quiet else None,
+        )
         watcher.start()
         try:
             while True:
-                import time
                 time.sleep(1)
         except KeyboardInterrupt:
-            print("\nStopping watcher...")
+            if not args.quiet:
+                print("\nStopping watcher...")
             watcher.stop()
-            print("Watcher stopped.")
+            if not args.quiet:
+                print("Watcher stopped.")
         return
 
     # Organize / Dry run
@@ -77,7 +87,10 @@ def run_cli(args):
     print(f"Errors:        {result['errors']}")
     print("=" * 40)
 
-    if not args.dry_run and result["moved"] > 0:
+    if result.get("history_warning"):
+        print(f"\n{result['history_warning']}")
+
+    if not args.dry_run and (result["moved"] + result["duplicates"]) > 0:
         print(f"\nTip: To undo this operation, run:")
         print(f'  python main.py --path "{target}" --undo')
 
